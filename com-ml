@@ -1,0 +1,257 @@
+#!/bin/bash
+mkdir -p /etc/yum.repo.d/1
+mv /etc/yum.repo.d/Centos-* /etc/yum.repo.d/1
+vi /root/qyy.repo <<EOF
+[Base]
+name=base
+baseurl=http://192.168.1.31/repos/centos/7/os/x86_64/
+gpgcheck=0
+enabled=1
+[Extras]
+name=extras
+baseurl=http://192.168.1.31/repos/centos/7/extras/x86_64
+gpgcheck=0
+enabled=1
+[Updates]
+name=updates
+baseurl=http://192.168.1.31/repos/centos/7/updates/x86_64
+gpgcheck=0
+enabled=1
+[OpenStack]
+name=openstack
+baseurl=http://192.168.1.31/repos/centos/7/cloud/x86_64/openstack-queens/
+gpgcheck=0
+enabled=1
+[virt]
+name=virt
+baseurl=http://192.168.1.31/repos/centos/7/virt/x86_64/kvm-common/
+gpgcheck=0
+enabled=1
+EOF
+cp /root/qyy.repo /etc/yum.repo.d/qyy.repo -y
+
+#nova
+yum install openstack-nova-compute -y
+#egrep -c '(vmx|svm)' /proc/cpuinfo 
+vi /root/nova.conf << EOF
+[DEFAULT]
+transport_url = rabbit://openstack:123456@ctrl
+my_ip = 192.168.150.25
+use_neutron = true
+firewall_driver = nova.virt.firewall.NoopFirewallDriver
+[api]
+auth_strategy = keystone
+[api_database]
+[barbican]
+[cache]
+[cells]
+[cinder]
+[compute]
+[conductor]
+[console]
+[consoleauth]
+[cors]
+[crypto]
+[database]
+[devices]
+[ephemeral_storage_encryption]
+[filter_scheduler]
+[glance]
+api_servers = http://ctrl:9292
+[guestfs]
+[healthcheck]
+[hyperv]
+[ironic]
+[key_manager]
+[keystone]
+[keystone_authtoken]
+auth_url = http://ctrl:5000/v3
+memcached_servers = ctrl:11211
+auth_type = password
+project_domain_name = default
+user_domain_name = default
+project_name = service
+username = nova
+password = 123456
+[libvirt]
+virt_type = kvm
+#查CPU的值为0  是 qemu  为1 kvm
+[matchmaker_redis]
+[metrics]
+[mks]
+[neutron]
+url = http://ctrl:9696
+auth_url = http://ctrl:5000
+auth_type = password
+project_domain_name = default
+user_domain_name = default
+region_name = RegionOne
+project_name = service
+username = neutron
+password = 123456
+[notifications]
+[osapi_v21]
+[oslo_concurrency]
+lock_path = /var/lib/nova/tmp
+[oslo_messaging_amqp]
+[oslo_messaging_kafka]
+[oslo_messaging_notifications]
+[oslo_messaging_rabbit]
+[oslo_messaging_zmq]
+[oslo_middleware]
+[oslo_policy]
+[pci]
+[placement]
+region_name = RegionOne
+project_domain_name = Default
+project_name = service
+auth_type = password
+user_domain_name = Default
+auth_url = http://ctrl:5000/v3
+username = placement
+password = 123456
+[quota]
+[rdp]
+[remote_debug]
+[scheduler]
+[serial_console]
+[service_user]
+[spice]
+[upgrade_levels]
+[vault]
+[vendordata_dynamic_auth]
+[vmware]
+[vnc]
+enabled = true
+server_listen = 0.0.0.0
+server_proxyclient_address = $my_ip
+novncproxy_base_url = http://ctrl:6080/vnc_auto.html
+[workarounds]
+[wsgi]
+[xenserver]
+[xvp]
+EOF
+cp /root/nova.conf /etc/nova/nova.conf -y
+systemctl enable libvirtd.service openstack-nova-compute.service
+systemctl start libvirtd.service openstack-nova-compute.service
+
+#neutron
+yum install openstack-neutron-linuxbridge ebtables ipset -y
+vi /root/neutron.conf <<EOF 
+[DEFAULT]
+transport_url = rabbit://openstack:123456@ctrl
+auth_strategy = keystone
+[agent]
+[cors]
+[database]
+[keystone_authtoken]
+www_authenticate_uri = http://ctrl:5000
+auth_url = http://ctrl:5000
+memcached_servers = ctrl:11211
+auth_type = password
+project_domain_name = default
+user_domain_name = default
+project_name = service
+username = neutron
+password = 123456
+[matchmaker_redis]
+[nova]
+[oslo_concurrency]
+lock_path = /var/lib/neutron/tmp
+[oslo_messaging_amqp]
+[oslo_messaging_kafka]
+[oslo_messaging_notifications]
+[oslo_messaging_rabbit]
+[oslo_messaging_zmq]
+[oslo_middleware]
+[oslo_policy]
+[quotas]
+[ssl]
+EOF
+vi /root/linuxbridge_agent.conf <<EOF
+[DEFAULT]
+[agent]
+[linux_bridge]
+physical_interface_mappings = provider:eth1
+[network_log]
+[securitygroup]
+enable_security_group = true
+firewall_driver = neutron.agent.linux.iptables_firewall.IptablesFirewallDriver
+[vxlan]
+enable_vxlan = true
+local_ip = 192.168.150.25 
+#计算节点ip
+l2_population = true
+EOF
+cp /root/neutron.conf /etc/neutron/ -y
+cp /root/linuxbridge_agent.conf /etc/neutron/plugins/ml2/ -y
+systemctl restart openstack-nova-compute.service
+systemctl enable neutron-linuxbridge-agent.service
+systemctl start neutron-linuxbridge-agent.service
+
+#cinder 
+yum install lvm2 device-mapper-persistent-data -y
+systemctl enable lvm2-lvmetad.service
+systemctl start lvm2-lvmetad.service
+pvcreate /dev/sdb
+vgcreate cinder-volumes /dev/sdb
+#/etc/lvm/lvm.conf 中的device    filter = [ "a|.*/|" ]
+yum install openstack-cinder targetcli python-keystone -y
+vi /root/cinder.conf <<EOF
+[DEFAULT]
+transport_url = rabbit://openstack:123456@ctrl
+auth_strategy = keystone
+my_ip = 192.168.150.25
+enabled_backends = lvm
+glance_api_servers = http://ctrl:9292
+[backend]
+[backend_defaults]
+[barbican]
+[brcd_fabric_example]
+[cisco_fabric_example]
+[coordination]
+[cors]
+[database]
+connection = mysql+pymysql://cinder:123456@ctrl/cinder
+[fc-zone-manager]
+[healthcheck]
+[key_manager]
+[keystone_authtoken]
+auth_uri = http://ctrl:5000
+auth_url = http://ctrl:5000
+memcached_servers = ctrl:11211
+auth_type = password
+project_domain_id = default
+user_domain_id = default
+project_name = service
+username = cinder
+password = 123456
+[matchmaker_redis]
+[nova]
+[oslo_concurrency]
+lock_path = /var/lib/cinder/tmp
+[oslo_messaging_amqp]
+[oslo_messaging_kafka]
+[oslo_messaging_notifications]
+[oslo_messaging_rabbit]
+[oslo_messaging_zmq]
+[oslo_middleware]
+[oslo_policy]
+[oslo_reports]
+[oslo_versionedobjects]
+[profiler]
+[service_user]
+[ssl]
+[vault]
+[lvm]
+volume_driver = cinder.volume.drivers.lvm.LVMVolumeDriver
+volume_group = cinder-volumes
+iscsi_protocol = iscsi
+iscsi_helper = lioadm
+EOF
+cp /root/cinder.conf /etc/cinder/ -y
+systemctl enable openstack-cinder-volume.service target.service
+systemctl start openstack-cinder-volume.service target.service
+
+
+

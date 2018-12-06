@@ -1,0 +1,651 @@
+#!/bin/bash
+#新建本地源
+mkdir -p /etc/yum.repo.d/1
+mv /etc/yum.repo.d/Centos-* /etc/yum.repo.d/1
+vi /root/qyy.repo <<EOF
+[Base]
+name=base
+baseurl=http://192.168.1.31/repos/centos/7/os/x86_64/
+gpgcheck=0
+enabled=1
+[Extras]
+name=extras
+baseurl=http://192.168.1.31/repos/centos/7/extras/x86_64
+gpgcheck=0
+enabled=1
+[Updates]
+name=updates
+baseurl=http://192.168.1.31/repos/centos/7/updates/x86_64
+gpgcheck=0
+enabled=1
+[OpenStack]
+name=openstack
+baseurl=http://192.168.1.31/repos/centos/7/cloud/x86_64/openstack-queens/
+gpgcheck=0
+enabled=1
+[virt]
+name=virt
+baseurl=http://192.168.1.31/repos/centos/7/virt/x86_64/kvm-common/
+gpgcheck=0
+enabled=1
+EOF
+cp /root/qyy.repo /etc/yum.repo.d/
+
+#安装数据库,初始化
+yum install mariadb-server python2-PyMySQL -y
+vi /root/openstack.cnf << EOF
+[mysqld]
+bind-address = 192.168.150.75
+
+default-storage-engine = innodb
+innodb_file_per_table = on
+max_connections = 4096
+collation-server = utf8_general_ci
+character-set-server = utf8
+EOF
+cp /root/openstack.cnf /etc/my.cnf.d/
+systemctl enable mariadb.service
+systemctl start mariadb.service
+mysql_secure_installation <<EOF
+
+Y
+123456
+123456
+Y
+Y
+Y
+Y
+Y
+EOF
+
+#安装rabbitmq,
+vi /root/adminrc << EOF
+export OS_USERNAME=admin
+export OS_PASSWORD=123456
+export OS_PROJECT_NAME=admin
+export OS_USER_DOMAIN_NAME=Default
+export OS_PROJECT_DOMAIN_NAME=Default
+export OS_AUTH_URL=http://ctrl:5000/v3
+export OS_IDENTITY_API_VERSION=3
+EOF
+source adminrc
+yum install rabbitmq-server -y
+systemctl enable rabbitmq-server.service
+systemctl start rabbitmq-server.service
+rabbitmqctl add_user openstack 123456
+rabbitmqctl set_permissions openstack ".*" ".*" ".*"
+rabbitmq-plugins enable rabbitmq-management
+
+#memcached的安装启动
+yum install memcached python-memcached -y
+vi /root/memcached <<EOF
+PORT="11211"
+USER="memcached"
+MAXCONN="1024"
+CACHESIZE="64"
+OPTIONS="-l 192.168.150.75,::1"
+EOF
+cp /root/memcached /etc/sysconfig/memcached -y
+systemctl enable memcached.service
+systemctl start memcached.service
+
+#安装图形界面
+yum install python-openstackclient -y
+yum install openstack-dashboard -y
+cp /root/local_settings /etc/openstack-dashboard/local_settings -y
+systemctl start httpd
+
+#keystone的安装启动
+mysql -uroot -p123456 -e "CREATE DATABASE keystone"
+mysql -uroot -p123456 -e "GRANT ALL PRIVILEGES ON keystone.* TO 'keystone'@'localhost' IDENTIFIED BY '123456'"
+mysql -uroot -p123456 -e "GRANT ALL PRIVILEGES ON keystone.* TO 'keystone'@'%' IDENTIFIED BY '123456'"
+yum install openstack-keystone -y
+vi /root/keystone.conf << EOF
+[DEFAULT]
+[application_credential]
+[assignment]
+[auth]
+[cache]
+[catalog]
+[cors]
+[credential]
+[database]
+connection = mysql+pymysql://keystone:123456@ctrl/keystone
+[domain_config]
+[endpoint_filter]
+[endpoint_policy]
+[eventlet_server]
+[federation]
+[fernet_tokens]
+[healthcheck]
+[identity]
+[identity_mapping]
+[ldap]
+[matchmaker_redis]
+[memcache]
+[oauth1]
+[oslo_messaging_amqp]
+[oslo_messaging_kafka]
+[oslo_messaging_notifications]
+[oslo_messaging_rabbit]
+[oslo_messaging_zmq]
+[oslo_middleware]
+[oslo_policy]
+[paste_deploy]
+[policy]
+[profiler]
+[resource]
+[revoke]
+[role]
+[saml]
+[security_compliance]
+[shadow_users]
+[signing]
+[token]
+provider = fernet
+[tokenless_auth]
+[trust]
+[unified_limit]
+EOF
+cp /root/keystone.conf /etc/keystone/keystone.conf -y
+su -s /bin/sh -c "keystone-manage db_sync" keystone
+keystone-manage fernet_setup --keystone-user keystone --keystone-group keystone
+keystone-manage credential_setup --keystone-user keystone --keystone-group keystone
+keystone-manage bootstrap --bootstrap-password 123456 --bootstrap-admin-url http://ctrl:5000/v3/ --bootstrap-internal-url http://ctrl:5000/v3/ --bootstrap-public-url http://ctrl:5000/v3/ --bootstrap-region-id RegionOne
+cp /root/httpd.conf /etc/httpd/conf/httpd.conf -y
+#ServerName
+ln -s /usr/share/keystone/wsgi-keystone.conf /etc/httpd/conf.d/
+systemctl enable httpd.service
+systemctl start httpd.service
+
+#glance
+mysql -uroot -p123456 -e "CREATE DATABASE glance"
+mysql -uroot -p123456 -e "GRANT ALL PRIVILEGES ON glance.* TO 'glance'@'localhost' IDENTIFIED BY '123456'"
+mysql -uroot -p123456 -e "GRANT ALL PRIVILEGES ON glance.* TO 'glance'@'%' IDENTIFIED BY '123456'"
+openstack user create --domain default --password-prompt glance <<EOF
+123456
+123456
+EOF
+openstack project create service
+openstack role add --project service --user glance admin
+openstack service create --name glance  --description "OpenStack Image" image
+openstack endpoint create --region RegionOne  image public http://ctrl:9292
+openstack endpoint create --region RegionOne  image internal http://ctrl:9292
+openstack endpoint create --region RegionOne  image admin http://ctrl:9292
+yum install openstack-glance -y
+vi /root/glance-api.conf <<EOF
+[DEFAULT]
+[cors]
+[database]
+connection = mysql+pymysql://glance:123456@ctrl/glance
+[glance_store]
+stores = file,http
+default_store = file
+filesystem_store_datadir = /var/lib/glance/images/
+[image_format]
+[keystone_authtoken]
+www_authenticate_uri = http://ctrl:5000
+auth_url = http://ctrl:5000
+memcached_servers = ctrl:11211
+auth_type = password
+project_domain_name = Default
+user_domain_name = Default
+project_name = service
+username = glance
+password = 123456
+[matchmaker_redis]
+[oslo_concurrency]
+[oslo_messaging_amqp]
+[oslo_messaging_kafka]
+[oslo_messaging_notifications]
+[oslo_messaging_rabbit]
+[oslo_messaging_zmq]
+[oslo_middleware]
+[oslo_policy]
+[paste_deploy]
+flavor = keystone
+[profiler]
+[store_type_location_strategy]
+[task]
+[taskflow_executor]
+EOF
+vi /root/glance-registry.conf << EOF
+[DEFAULT]
+[database]
+connection = mysql+pymysql://glance:123456@ctrl/glance
+[keystone_authtoken]
+www_authenticate_uri = http://ctrl:5000
+auth_url = http://ctrl:5000
+memcached_servers = ctrl:11211
+auth_type = password
+project_domain_name = Default
+user_domain_name = Default
+project_name = service
+username = glance
+password = 123456
+[matchmaker_redis]
+[oslo_messaging_amqp]
+[oslo_messaging_kafka]
+[oslo_messaging_notifications]
+[oslo_messaging_rabbit]
+[oslo_messaging_zmq]
+[oslo_policy]
+[paste_deploy]
+flavor = keystone
+[profiler]
+
+EOF
+cp /root/glance-api.conf /root/glance-registry.conf /etc/glance -y
+su -s /bin/sh -c "glance-manage db_sync" glance
+systemctl enable openstack-glance-api.service openstack-glance-registry.service
+systemctl start openstack-glance-api.service openstack-glance-registry.service
+
+
+#Nova的安装启动
+mysql -uroot -p123456 -e "CREATE DATABASE nova_api"
+mysql -uroot -p123456 -e "CREATE DATABASE nova"
+mysql -uroot -p123456 -e "CREATE DATABASE nova_cell0"
+mysql -uroot -p123456 -e "CREATE DATABASE placement"
+mysql -uroot -p123456 -e "GRANT ALL PRIVILEGES ON nova_api.* TO 'nova'@'localhost' IDENTIFIED BY '123456'"
+mysql -uroot -p123456 -e "GRANT ALL PRIVILEGES ON nova_api.* TO 'nova'@'%' IDENTIFIED BY '123456'"
+mysql -uroot -p123456 -e "GRANT ALL PRIVILEGES ON nova.* TO 'nova'@'localhost' IDENTIFIED BY '123456'"
+mysql -uroot -p123456 -e "GRANT ALL PRIVILEGES ON nova.* TO 'nova'@'%' IDENTIFIED BY '123456'"
+mysql -uroot -p123456 -e "GRANT ALL PRIVILEGES ON nova_cell0.* TO 'nova'@'localhost' IDENTIFIED BY '123456'"
+mysql -uroot -p123456 -e "GRANT ALL PRIVILEGES ON nova_cell0.* TO 'nova'@'%' IDENTIFIED BY '123456'"
+mysql -uroot -p123456 -e "GRANT ALL PRIVILEGES ON placement.* TO 'placement'@'localhost' IDENTIFIED BY '123456'"
+mysql -uroot -p123456 -e "GRANT ALL PRIVILEGES ON placement.* TO 'placement'@'%' IDENTIFIED BY '123456'"
+openstack user create --domain default --password-prompt nova <<EOF
+123456
+123456
+EOF
+openstack role add --project service --user nova admin
+openstack service create --name nova --description "OpenStack Compute" compute
+openstack endpoint create --region RegionOne compute public http://ctrl:8774/v2.1
+openstack endpoint create --region RegionOne compute internal http://ctrl:8774/v2.1
+openstack endpoint create --region RegionOne compute admin http://ctrl:8774/v2.1
+openstack user create --domain default --password-prompt placement <<EOF
+123456
+123456
+EOF
+openstack role add --project service --user placement admin
+openstack service create --name placement --description "Placement API" placement
+openstack endpoint create --region RegionOne placement public http://ctrl:8778
+openstack endpoint create --region RegionOne placement internal http://ctrl:8778
+openstack endpoint create --region RegionOne placement admin http://ctrl:8778
+yum install openstack-nova-api openstack-nova-conductor openstack-nova-console openstack-nova-novncproxy openstack-nova-scheduler openstack-nova-placement-api -y
+vi /root/nova.conf << EOF
+[DEFAULT]
+transport_url = rabbit://openstack:123456@ctrl
+my_ip = 192.168.150.75
+use_neutron = true
+firewall_driver = nova.virt.firewall.NoopFirewallDriver
+[api]
+auth_strategy = keystone
+[api_database]
+connection = mysql+pymysql://nova:123456@ctrl/nova_api
+[barbican]
+[cache]
+[cells]
+[cinder]
+os_region_name = RegionOne
+[compute]
+[conductor]
+[console]
+[consoleauth]
+[cors]
+[crypto]
+[database]
+connection = mysql+pymysql://nova:123456@ctrl/nova
+[devices]
+[ephemeral_storage_encryption]
+[filter_scheduler]
+[glance]
+api_servers = http://ctrl:9292
+[guestfs]
+[healthcheck]
+[hyperv]
+[ironic]
+[key_manager]
+[keystone]
+[keystone_authtoken]
+auth_url = http://ctrl:5000/v3
+memcached_servers = ctrl:11211
+auth_type = password
+project_domain_name = default
+user_domain_name = default
+project_name = service
+username = nova
+password = 123456
+[libvirt]
+[matchmaker_redis]
+[metrics]
+[mks]
+[neutron]
+url = http://ctrl:9696
+auth_url = http://ctrl:5000
+auth_type = password
+project_domain_name = default
+user_domain_name = default
+region_name = RegionOne
+project_name = service
+username = neutron
+password = 123456
+service_metadata_proxy = true
+metadata_proxy_shared_secret = 123456
+[notifications]
+[osapi_v21]
+[oslo_concurrency]
+lock_path = /var/lib/nova/tmp
+[oslo_messaging_amqp]
+[oslo_messaging_kafka]
+[oslo_messaging_notifications]
+[oslo_messaging_rabbit]
+[oslo_messaging_zmq]
+[oslo_middleware]
+[oslo_policy]
+[pci]
+[placement]
+region_name = RegionOne
+project_domain_name = Default
+project_name = service
+auth_type = password
+user_domain_name = Default
+auth_url = http://ctrl:5000/v3
+username = placement
+password = 123456
+[placement_database]
+connection = mysql+pymysql://placement:123456@ctrl/placement
+[quota]
+[rdp]
+[remote_debug]
+[scheduler]
+discover_hosts_in_cells_interval = 300
+[serial_console]
+[service_user]
+[spice]
+[upgrade_levels]
+[vault]
+[vendordata_dynamic_auth]
+[vmware]
+[vnc]
+enabled = true
+server_listen = $my_ip
+server_proxyclient_address = $my_ip
+[workarounds]
+[wsgi]
+[xenserver]
+[xvp]
+EOF
+vi /root/00-nova-placement-api.conf << EOF
+Listen 8778
+
+<VirtualHost *:8778>
+  WSGIProcessGroup nova-placement-api
+  WSGIApplicationGroup %{GLOBAL}
+  WSGIPassAuthorization On
+  WSGIDaemonProcess nova-placement-api processes=3 threads=1 user=nova group=nova
+  WSGIScriptAlias / /usr/bin/nova-placement-api
+  <IfVersion >= 2.4>
+    ErrorLogFormat "%M"
+  </IfVersion>
+  ErrorLog /var/log/nova/nova-placement-api.log
+  #SSLEngine On
+  #SSLCertificateFile ...
+  #SSLCertificateKeyFile ...
+</VirtualHost>
+
+Alias /nova-placement-api /usr/bin/nova-placement-api
+<Location /nova-placement-api>
+  SetHandler wsgi-script
+  Options +ExecCGI
+  WSGIProcessGroup nova-placement-api
+  WSGIApplicationGroup %{GLOBAL}
+  WSGIPassAuthorization On
+</Location>
+
+<Directory /usr/bin>
+   <IfVersion >= 2.4>
+      Require all granted
+   </IfVersion>
+   <IfVersion < 2.4>
+      Order allow,deny
+      Allow from all
+   </IfVersion>
+</Directory>
+EOF
+cp /root/nova.conf /etc/nova/nova.conf -y
+cp /root/00-nova-placement-api.conf /etc/httpd/conf.d/00-nova-placement-api.conf -y
+systemctl restart httpd
+su -s /bin/sh -c "nova-manage api_db sync" nova
+su -s /bin/sh -c "nova-manage cell_v2 map_cell0" nova
+su -s /bin/sh -c "nova-manage cell_v2 create_cell --name=cell1 --verbose" nova
+su -s /bin/sh -c "nova-manage db sync" nova
+#确认nova cell0和cell1注册正确：
+su -s /bin/sh -c "nova-manage cell_v2 list_cells" nova
+systemctl enable openstack-nova-api.service openstack-nova-scheduler.service openstack-nova-conductor.service openstack-nova-novncproxy.service
+systemctl start openstack-nova-api.service openstack-nova-scheduler.service openstack-nova-conductor.service openstack-nova-novncproxy.service
+#com上的脚本运行完执行以下命令
+#source /root/adminrc
+#openstack compute service list --service nova-compute
+#su -s /bin/sh -c "nova-manage cell_v2 discover_hosts --verbose" nova
+
+
+#neutron
+mysql -uroot -p123456 -e "CREATE DATABASE neutron"
+mysql -uroot -p123456 -e "GRANT ALL PRIVILEGES ON neutron.* TO 'neutron'@'localhost' IDENTIFIED BY '123456'"
+mysql -uroot -p123456 -e "GRANT ALL PRIVILEGES ON neutron.* TO 'neutron'@'%' IDENTIFIED BY '123456'"
+openstack user create --domain default --password 123456 neutron
+openstack role add --project service --user neutron admin
+openstack service create --name neutron --description "OpenStack Networking" network
+openstack endpoint create --region RegionOne network public http://controller:9696
+openstack endpoint create --region RegionOne network internal http://controller:9696
+openstack endpoint create --region RegionOne network admin http://controller:9696
+yum install openstack-neutron openstack-neutron-ml2 openstack-neutron-linuxbridge ebtables -y
+vi /root/neutron.conf << EOF
+[DEFAULT]
+core_plugin = ml2
+service_plugins = router
+allow_overlapping_ips = true
+transport_url = rabbit://openstack:123456@ctrl
+auth_strategy = keystone
+notify_nova_on_port_status_changes = true
+notify_nova_on_port_data_changes = true
+[agent]
+[cors]
+[database]
+connection = mysql+pymysql://neutron:123456@ctrl/neutron
+[keystone_authtoken]
+www_authenticate_uri = http://ctrl:5000
+auth_url = http://ctrl:5000
+memcached_servers = ctrl:11211
+auth_type = password
+project_domain_name = default
+user_domain_name = default
+project_name = service
+username = neutron
+password = 123456
+[matchmaker_redis]
+[nova]
+auth_url = http://ctrl:5000
+auth_type = password
+project_domain_name = default
+user_domain_name = default
+region_name = RegionOne
+project_name = service
+username = nova
+password = 123456
+[oslo_concurrency]
+lock_path = /var/lib/neutron/tmp
+[oslo_messaging_amqp]
+[oslo_messaging_kafka]
+[oslo_messaging_notifications]
+[oslo_messaging_rabbit]
+[oslo_messaging_zmq]
+[oslo_middleware]
+[oslo_policy]
+[quotas]
+[ssl]
+EOF
+vi /root/l3_agent.ini << EOF
+[DEFAULT]
+interface_driver = linuxbridge
+[agent]
+[ovs]
+EOF
+vi /root/dhcp_agent.ini << EOF
+[DEFAULT]
+interface_driver = linuxbridge
+dhcp_driver = neutron.agent.linux.dhcp.Dnsmasq
+enable_isolated_metadata = true
+[agent]
+[ovs]
+EOF
+vi /root/metadata_agent.ini << EOF
+[DEFAULT]
+nova_metadata_host = ctrl
+metadata_proxy_shared_secret = 123456
+[agent]
+[cache]
+EOF
+vi /root/ml2_conf.ini << EOF
+[DEFAULT]
+[l2pop]
+[ml2]
+type_drivers = flat,vlan,vxlan
+tenant_network_types = vxlan
+mechanism_drivers = linuxbridge,l2population
+extension_drivers = port_security
+[ml2_type_flat]
+flat_networks = provider
+[ml2_type_geneve]
+[ml2_type_gre]
+[ml2_type_vlan]
+[ml2_type_vxlan]
+vni_ranges = 1:1000
+[securitygroup]
+enable_ipset = true
+EOF
+vi /root/linuxbridge_agent.ini << EOF
+[DEFAULT]
+[agent]
+[linux_bridge]
+physical_interface_mappings = provider:eth1
+[network_log]
+[securitygroup]
+enable_security_group = true
+firewall_driver = neutron.agent.linux.iptables_firewall.IptablesFirewallDriver
+[vxlan]
+enable_vxlan = true
+local_ip = 192.168.150.75
+l2_population = true
+EOF
+cp /root/neutron.conf /etc/neutron -y
+cp /root/l3_agent.ini /etc/neutron -y
+cp /root/dhcp_agent.ini /etc/neutron -y
+cp /root/metadata_agent.ini /etc/neutron -y
+cp /root/ml2_conf.ini /etc/neutron/plugins/ml2 -y
+cp /root/linuxbridge_agent.ini /etc/neutron/plugins/ml2 -y
+#/etc/nova/nova.conf 
+#[neutron]
+systemctl restart nova-api.service
+systemctl restart nova-scheduler.service
+systemctl restart nova-conductor.service
+systemctl restart nova-novncproxy.servic
+ln -s /etc/neutron/plugins/ml2/ml2_conf.ini /etc/neutron/plugin.ini
+su -s /bin/sh -c "neutron-db-manage --config-file /etc/neutron/neutron.conf --config-file /etc/neutron/plugins/ml2/ml2_conf.ini upgrade head" neutron
+systemctl restart openstack-nova-api.service
+systemctl enable neutron-server.service neutron-linuxbridge-agent.service neutron-dhcp-agent.service neutron-metadata-agent.service neutron-l3-agent.service
+systemctl start neutron-server.service neutron-linuxbridge-agent.service neutron-dhcp-agent.service neutron-metadata-agent.service neutron-l3-agent.service
+
+openstack network create provider --external --provider-network-type flat --provider-physical-network provider --share
+openstack subnet create sub-provider --subnet-range 192.168.101.0/24 --allocation-pool start=192.168.101.101,end=192.168.101.199 --dns-nameserver 114.114.114.114 --net work wangluo id --gatway 192.168.101.1
+openstack network create self-service
+openstack subnet create sub-self-service --network uuid --subnet-range 10.0.0.0/8 --allocation-pool start=10.0.0.101,end=10.0.0.199 --gatway 10.0.0.1
+openstack router create route
+openstack router add subnet rouid subid
+neutron router-gateway-set rouid wid
+openstack flavor create mini --vcpus 1 --ram 512 --disk 1
+openstack server create test --image id --nic net-id=id --flavor id
+
+
+#cinder
+vi adminrc <<EOF
+export OS_USERNAME=admin
+export OS_PASSWORD=123456
+export OS_PROJECT_NAME=admin
+export OS_USER_DOMAIN_NAME=Default
+export OS_PROJECT_DOMAIN_NAME=Default
+export OS_AUTH_URL=http://ctrl:5000/v3
+export OS_IDENTITY_API_VERSION=3
+EOF
+source adminrc
+mysql -uroot -p123456 -e "CREATE DATABASE cinder"
+mysql -uroot -p123456 -e "GRANT ALL PRIVILEGES ON cinder.* TO 'cinder'@'localhost' IDENTIFIED BY '123456'"
+mysql -uroot -p123456 -e "GRANT ALL PRIVILEGES ON cinder.* TO 'cinder'@'%' IDENTIFIED BY '123456'"
+openstack user create --domain default --password 123456 cinder
+openstack role add --project service --user cinder admin
+openstack service create --name cinderv2 --description "OpenStack Block Storage" volumev2
+openstack service create --name cinderv3 --description "OpenStack Block Storage" volumev3
+openstack endpoint create --region RegionOne volumev2 public http://controller:8776/v2/%\(project_id\)s
+openstack endpoint create --region RegionOne volumev2 internal http://controller:8776/v2/%\(project_id\)s
+openstack endpoint create --region RegionOne volumev2 admin http://controller:8776/v2/%\(project_id\)s
+openstack endpoint create --region RegionOne volumev3 public http://controller:8776/v3/%\(project_id\)
+openstack endpoint create --region RegionOne volumev3 internal http://controller:8776/v3/%\(project_id\)s
+openstack endpoint create --region RegionOne volumev3 admin http://controller:8776/v3/%\(project_id\)s
+
+yum install openstack-cinder -y
+vi /root/cinder.conf << EOF
+[DEFAULT]
+transport_url = rabbit://openstack:123456@ctrl
+auth_strategy = keystone
+my_ip = 192.168.150.75
+[backend]
+[backend_defaults]
+[barbican]
+[brcd_fabric_example]
+[cisco_fabric_example]
+[coordination]
+[cors]
+[database]
+connection = mysql+pymysql://cinder:123456@ctrl/cinder
+[fc-zone-manager]
+[healthcheck]
+[key_manager]
+[keystone_authtoken]
+www_authenticate_uri = http://ctrl:50007
+auth_url = http://ctrl:5000
+memcached_servers = ctrl:11211
+auth_type = password
+project_domain_id = default
+user_domain_id = default
+project_name = service
+username = cinder
+password = 123456
+[matchmaker_redis]
+[nova]
+[oslo_concurrency]
+lock_path = /var/lib/cinder/tmp
+[oslo_messaging_amqp]
+[oslo_messaging_kafka]
+[oslo_messaging_notifications]
+[oslo_messaging_rabbit]
+[oslo_messaging_zmq]
+[oslo_middleware]
+[oslo_policy]
+[oslo_reports]
+[oslo_versionedobjects]
+[profiler]
+[service_user]
+[ssl]
+[vault]
+EOF
+cp /root/cinder.conf /etc/cinder -y
+su -s /bin/sh -c "cinder-manage db sync" cinder
+#vi /etc/nova/nova.conf  
+# [cinder] os_region_name = RegionOne
+systemctl restart openstack-nova-api.service
+systemctl enable openstack-cinder-api.service openstack-cinder-scheduler.service
+systemctl start openstack-cinder-api.service openstack-cinder-scheduler.service
+#openstack volume service list
+
+
