@@ -1,0 +1,14 @@
+<network>
+  <name>shuai-provider</name>
+  <uuid>565a48b1-89c9-44a7-9a9b-adb888179d85</uuid>
+  <forward mode='nat'>
+    <nat>
+      <port start='1024' end='65535'/>
+    </nat>
+  </forward>
+  <bridge name='virbr92' stp='on' delay='0'/>
+  <mac address='52:54:00:bc:65:34'/>
+  <ip address='192.168.151.1' netmask='255.255.255.0'>
+  </ip>
+</network>
+
