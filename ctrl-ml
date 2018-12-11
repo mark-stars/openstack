@@ -558,9 +558,9 @@ systemctl enable neutron-server.service neutron-linuxbridge-agent.service neutro
 systemctl start neutron-server.service neutron-linuxbridge-agent.service neutron-dhcp-agent.service neutron-metadata-agent.service neutron-l3-agent.service
 
 openstack network create provider --external --provider-network-type flat --provider-physical-network provider --share
-openstack subnet create sub-provider --subnet-range 192.168.101.0/24 --allocation-pool start=192.168.101.101,end=192.168.101.199 --dns-nameserver 114.114.114.114 --net work wangluo id --gatway 192.168.101.1
+openstack subnet create sub-provider --subnet-range 192.168.101.0/24 --allocation-pool start=192.168.101.101,end=192.168.101.199 --dns-nameserver 114.114.114.114 --net work wangluo id --gateway 192.168.101.1
 openstack network create self-service
-openstack subnet create sub-self-service --network uuid --subnet-range 10.0.0.0/8 --allocation-pool start=10.0.0.101,end=10.0.0.199 --gatway 10.0.0.1
+openstack subnet create sub-self-service --network uuid --subnet-range 10.0.0.0/8 --allocation-pool start=10.0.0.101,end=10.0.0.199 --gateway 10.0.0.1
 openstack router create route
 openstack router add subnet rouid subid
 neutron router-gateway-set rouid wid

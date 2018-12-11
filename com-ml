@@ -168,7 +168,7 @@ lock_path = /var/lib/neutron/tmp
 [quotas]
 [ssl]
 EOF
-vi /root/linuxbridge_agent.conf <<EOF
+vi /root/linuxbridge_agent.ini <<EOF
 [DEFAULT]
 [agent]
 [linux_bridge]
@@ -184,7 +184,7 @@ local_ip = 192.168.150.25
 l2_population = true
 EOF
 cp /root/neutron.conf /etc/neutron/ -y
-cp /root/linuxbridge_agent.conf /etc/neutron/plugins/ml2/ -y
+cp /root/linuxbridge_agent.ini /etc/neutron/plugins/ml2/ -y
 systemctl restart openstack-nova-compute.service
 systemctl enable neutron-linuxbridge-agent.service
 systemctl start neutron-linuxbridge-agent.service
